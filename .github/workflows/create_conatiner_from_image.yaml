@@ -1,0 +1,80 @@
+name: Build, Push & Run Docker Image from ECR
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-west-2
+  ECR_REPOSITORY: sample-app
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    outputs:
+      image_tag: ${{ steps.export-tag.outputs.tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Export tag
+        id: export-tag
+        run: echo "tag=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Build & Push Docker Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.export-tag.outputs.tag }}
+        run: |
+          docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG \
+                     $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+
+  run-container:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Pull and Run Docker Container
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+        run: |
+          docker pull $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+          docker run -d -p 3000:3000 --name test-app \
+            $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+
+      - name: Wait and Test App
+        run: |
+          sleep 5
+          curl -v http://localhost:3000 || echo "App not responding"
